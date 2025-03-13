@@ -21,10 +21,10 @@ class DroneFireExtEnv(gym.Env):
     def __init__(self):
         super(DroneFireExtEnv, self).__init__()
         # Time step and physics constants
-        self.dt = 0.05              # Reduced from 0.1 to 0.05 for slower simulation
-        self.gravity = 9.8         # gravitational acceleration
-        self.thrust_scale = 20.0   # scaling for the combined thrust
-        self.torque_scale = 5.0    # scaling for angular acceleration
+        self.dt = 0.05              # Reduced time step for more stable simulation
+        self.gravity = 9.8          # gravitational acceleration
+        self.thrust_scale = 40.0    # Doubled from 20.0 to 40.0 for stronger thrust
+        self.torque_scale = 5.0     # scaling for angular acceleration
 
         # Define environment boundaries (for state clipping and reward)
         self.x_bounds = (-100, 100)
@@ -98,8 +98,9 @@ class DroneFireExtEnv(gym.Env):
         # Horizontal acceleration approximated via tilt (sin component).
         ax = math.sin(self.drone_angle) * total_thrust
 
-        # Vertical acceleration: thrust minus gravity.
-        ay = total_thrust - self.gravity
+        # Vertical acceleration: thrust (cos component) minus gravity
+        # Use cosine to ensure vertical thrust is strongest when drone is level
+        ay = math.cos(self.drone_angle) * total_thrust - self.gravity
 
         # Update velocities using simple Euler integration.
         self.drone_vel[0] += ax * self.dt
@@ -132,20 +133,21 @@ class DroneFireExtEnv(gym.Env):
         progress_reward = 0.5 * (self.previous_distance - distance)
         self.previous_distance = distance
         
-        # Initialize done flag
-        done = False
+        # Initialize termination flags
+        terminated = False
+        truncated = False
         
         # Success reward
         success_reward = 0.0
         if distance < 5.0:
             success_reward = 100.0
-            done = True
+            terminated = True
         
         # Crash penalty
         crash_penalty = 0.0
         if not (self.y_bounds[0] <= self.drone_pos[1] <= self.y_bounds[1]):
             crash_penalty = -50.0
-            done = True
+            terminated = True
         
         # Combine all rewards
         reward = (
@@ -164,7 +166,7 @@ class DroneFireExtEnv(gym.Env):
             'stability_score': angular_velocity_penalty + tilt_penalty
         }
 
-        return self._get_obs(), reward, done, info
+        return self._get_obs(), reward, terminated, truncated, info
 
     def _get_obs(self):
         # Observation: [drone_x, drone_y, drone_vx, drone_vy, drone_angle, drone_angular_vel, fire_dx, fire_dy]
@@ -273,34 +275,38 @@ def simulate_trained_model(model_path="drone_fire_model.zip"):
         env = DroneFireExtEnv()
         # Load the trained model
         model = PPO.load(model_path)
-        obs = env.reset()
-        done = False
         
-        while not done:
+        # Get only the observation from reset (discard the info)
+        obs, _ = env.reset()
+        terminated = False
+        truncated = False
+        
+        while not (terminated or truncated):
             # Handle Pygame events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    done = True
+                    terminated = True
                     break
-            if done:
+            if terminated:
                 break
                 
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, done, info = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
             env.render()
             
     except Exception as e:
         print(f"Simulation error: {e}")
     finally:
         pygame.quit()
-        if env:
+        if 'env' in locals():
             env.close()
 
 def human_control_mode():
     pygame.init()
     env = DroneFireExtEnv()
-    obs = env.reset()
-    done = False
+    obs, _ = env.reset()  # Unpack the observation, discard info
+    terminated = False
+    truncated = False
     
     # Initialize control variables
     left_thrust = 0.5
@@ -317,17 +323,17 @@ def human_control_mode():
     print("ESC - Quit\n")
     
     try:
-        while not done:
+        while not (terminated or truncated):
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    done = True
+                    terminated = True
                     break
                 
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        done = True
+                        terminated = True
                     elif event.key == pygame.K_r:
-                        obs = env.reset()
+                        obs, _ = env.reset()
                         left_thrust = 0.5
                         right_thrust = 0.5
                     elif event.key == pygame.K_SPACE:
@@ -353,7 +359,7 @@ def human_control_mode():
                 right_thrust = max(0.0, right_thrust - thrust_delta)
             
             action = np.array([left_thrust, right_thrust])
-            obs, reward, done, info = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
             
             print(f"\rReward: {reward:+.2f} | Distance: {info['distance_to_fire']:.2f} | Time: {info['time']:.1f}s | Thrust L/R: {left_thrust:.2f}/{right_thrust:.2f}", end="")
             
@@ -371,8 +377,9 @@ def record_human_demonstration():
     env = DroneFireExtEnv()
     demonstrations = []  # Store (state, action, reward) tuples
     
-    obs = env.reset()
-    done = False
+    obs, _ = env.reset()  # Unpack the observation, discard info
+    terminated = False
+    truncated = False
     
     # Initialize control variables
     left_thrust = 0.5  # Start with balanced thrust
@@ -388,18 +395,18 @@ def record_human_demonstration():
     print("ESC - Quit and save demonstration\n")
     
     try:
-        while not done:
+        while not (terminated or truncated):
             # Handle events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    done = True
+                    terminated = True
                     break
                 
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        done = True
+                        terminated = True
                     elif event.key == pygame.K_r:
-                        obs = env.reset()
+                        obs, _ = env.reset()
                         left_thrust = 0.5
                         right_thrust = 0.5
             
@@ -424,7 +431,7 @@ def record_human_demonstration():
             
             # Take action and get feedback
             action = np.array([left_thrust, right_thrust])
-            new_obs, reward, done, info = env.step(action)
+            new_obs, reward, terminated, truncated, info = env.step(action)
             
             # Record the demonstration step
             demonstrations.append({
@@ -432,7 +439,7 @@ def record_human_demonstration():
                 'action': action,
                 'reward': reward,
                 'next_observation': new_obs,
-                'done': done
+                'done': terminated or truncated
             })
             
             obs = new_obs
